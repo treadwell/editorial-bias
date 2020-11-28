@@ -1,0 +1,20 @@
+---
+title: "BERT in R"
+output: html_notebook
+---
+
+```{r}
+library(tidyverse)
+library(RBERT)
+library(RBERTviz)
+```
+# Attention
+```{r}
+download_BERT_checkpoint("bert_base_uncased")
+extract_features(
+  "I love tacos.",
+  model = "bert_base_uncased",
+  layer_indexes = 1:12,
+  features = "attention"
+)$attention %>% visualize_attention()
+```

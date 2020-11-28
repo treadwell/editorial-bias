@@ -1,0 +1,210 @@
+---
+title: "Editorial Bias Detection"
+author: "Ken Brooks"
+date: "9/27/2020"
+output:
+  pdf_document: default
+  html_document: default
+---
+# Setup
+
+## Options
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  fig.pos = 'h',
+  echo = FALSE,
+  warning = FALSE,
+  message = FALSE,
+  autodep = TRUE,
+  cache = TRUE,
+  fig.width = 7,  # was 6
+  fig.asp = 0.618,  # was 0.618
+  out.width = "70%",
+  fig.align = "center",
+  fig.show = "hold")
+
+remove(list = ls()) # clear environment
+```
+
+## Locations
+
+```{r locations}
+root <- rprojroot::find_rstudio_root_file()
+# this refers to a directory that is not in the repo
+dataDir <- 'epubs'
+
+```
+
+## Packages
+
+```{r packages-load}
+packages <- c('tidyverse','epubr', 'tidytext', 'widyr')
+# packagesColon <- c('DT')
+purrr::walk(packages, library, character.only=TRUE)
+```
+
+## Files
+
+```{r list-files-func}
+listFiles <- function(dirPath)
+{
+    allfiles <- c(
+    list.files(dirPath, pattern="*\\.epub$", full.names=TRUE)
+    # list.files(dirPath, pattern="*\\.pdf$", recursive = TRUE, full.names=TRUE),
+    # list.files(dirPath, pattern="*\\.docx?$", recursive = TRUE,,    #, ,   full.names=TRUE)
+    )
+
+    return(allfiles)
+}
+
+
+# list.files(dataDir)
+
+allFiles <- listFiles(dataDir)
+
+print(allFiles)
+```
+# Load and transform
+
+## Load data
+
+```{r}
+typeof(allFiles)
+
+# titles <- epub(allFiles)  # gets all data
+
+title <- epub(allFiles[1])
+```
+
+## Explore data
+
+```{r}
+# Add multiple titles with title ID field
+title$data[[1]]
+
+text <- title$data[[1]] %>% 
+  select(text, section)
+
+text
+```
+## Stopwords
+```{r}
+# Modify stopwords to exclude gender words
+# Modify stopwords to exclude sentiment words
+
+stop_words <- get_stopwords()
+
+male_words = c("he", "him", "his", "man", "male", "masculine")
+female_words = c("she", "her", "hers", "woman", "female", "feminine")
+sentiment_words <- get_sentiments("afinn") %>% select(word)
+
+stopwords <- stop_words %>% 
+  filter(!word %in% male_words,
+         !word %in% female_words,
+         !word %in% sentiment_words)
+
+```
+
+
+## Unigram probabilities
+
+```{r}
+
+unigram_probs <- text %>%
+  tidytext::unnest_tokens(word, text) %>%
+  anti_join(stop_words) %>% 
+  count(word, sort = TRUE) %>%
+  mutate(p = n / sum(n)) 
+
+head(unigram_probs)
+```
+
+## Skipgrams
+
+```{r}
+
+#create context window with length 8
+tidy_skipgrams <- text %>%
+    unnest_tokens(ngram, text, token = "ngrams", n = 8) %>%
+    mutate(ngramID = row_number()) %>% 
+    tidyr::unite(skipgramID, section, ngramID) %>%
+    unnest_tokens(word, ngram)
+
+#calculate probabilities
+skipgram_probs <- tidy_skipgrams %>%
+    pairwise_count(word, skipgramID, diag = TRUE, sort = TRUE) %>%
+    mutate(p = n / sum(n))
+
+#normalize probabilities
+normalized_prob <- skipgram_probs %>%
+    filter(n > 20) %>%
+    rename(word1 = item1, word2 = item2) %>%
+    left_join(unigram_probs %>%
+                  select(word1 = word, p1 = p),
+              by = "word1") %>%
+    left_join(unigram_probs %>%
+                  select(word2 = word, p2 = p),
+              by = "word2") %>%
+    mutate(p_together = p / p1 / p2)
+```
+
+Look at a few lines
+
+```{r}
+normalized_prob[2005:2010,]
+
+```
+## Gender-associated terms
+```{r}
+
+# filter stopwords from 2nd word - done
+# Add regex to first words to get multiple gender-relations
+# Capture the top 20
+# Do a sentiment analysis on those
+
+male_terms <- normalized_prob %>% 
+  filter(word1 %in% male_words) %>%
+  filter(!word2 %in% stop_words$word ) %>% 
+  arrange(-p_together) %>% 
+  head(200) %>% 
+  select(word = word2) 
+
+head(male_terms)
+
+female_terms <- normalized_prob %>% 
+  filter(word1 %in% female_words) %>%
+  filter(!word2 %in% stop_words$word ) %>% 
+  arrange(-p_together) %>% 
+  head(200) %>% 
+  select(word = word2)
+    
+```
+
+## Sentiment score
+
+```{r}
+# To do
+#   combine the two dataframes here and then use summarize
+#   use inner_join
+
+# Do the difference for books / chapters and show the distribution of differences
+
+sentiment <- get_sentiments("afinn")
+
+# Male sentiment
+male_terms %>% 
+  inner_join(sentiment) %>% 
+  summarize(n = n(),
+            Avg = mean(value))
+
+# Female sentiment
+female_terms %>% 
+  inner_join(sentiment) %>% 
+  summarize(n = n(),
+            Avg = mean(value))
+
+
+```
+
+

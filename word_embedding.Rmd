@@ -1,0 +1,198 @@
+---
+title: "Word Embedding"
+author: "Ken Brooks"
+date: "8/22/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(
+  fig.pos = 'h',
+  echo = FALSE,
+  warning = FALSE,
+  message = FALSE,
+  autodep = TRUE,
+  cache = TRUE,
+  fig.width = 7,  # was 6
+  fig.asp = 0.618,  # was 0.618
+  out.width = "70%",
+  fig.align = "center",
+  fig.show = "hold")
+
+remove(list = ls()) # clear environment
+```
+
+# Load Packages
+
+```{r, echo=FALSE}
+
+packages <- c('tidyverse','assertthat', 'stringr', 'lubridate', 'tidytext', 'knitr')
+
+purrr::walk(packages, library, character.only=TRUE)
+
+```
+
+# Get data
+
+## Elected official tweets
+```{r}
+
+load(url("https://cbail.github.io/Elected_Official_Tweets.Rdata"))
+# We want to use original tweets, not retweets:
+elected_no_retweets <- elected_official_tweets %>%
+  filter(is_retweet == F) %>%
+  select(c("text"))
+#create tweet id
+elected_no_retweets$postID<-row.names(elected_no_retweets)
+
+head(elected_no_retweets)
+```
+
+## Analysis
+```{r echo=FALSE}
+
+library(widyr)
+#create context window with length 8
+tidy_skipgrams <- elected_no_retweets %>%
+    unnest_tokens(ngram, text, token = "ngrams", n = 8) %>%
+    mutate(ngramID = row_number()) %>% 
+    tidyr::unite(skipgramID, postID, ngramID) %>%
+    unnest_tokens(word, ngram)
+
+#calculate unigram probabilities (used to normalize skipgram probabilities later)
+unigram_probs <- elected_no_retweets %>%
+    unnest_tokens(word, text) %>%
+    count(word, sort = TRUE) %>%
+    mutate(p = n / sum(n))
+
+#calculate probabilities
+skipgram_probs <- tidy_skipgrams %>%
+    pairwise_count(word, skipgramID, diag = TRUE, sort = TRUE) %>%
+    mutate(p = n / sum(n))
+
+#normalize probabilities
+normalized_prob <- skipgram_probs %>%
+    filter(n > 20) %>%
+    rename(word1 = item1, word2 = item2) %>%
+    left_join(unigram_probs %>%
+                  select(word1 = word, p1 = p),
+              by = "word1") %>%
+    left_join(unigram_probs %>%
+                  select(word2 = word, p2 = p),
+              by = "word2") %>%
+    mutate(p_together = p / p1 / p2)
+```
+
+Look at a few lines
+
+```{r}
+normalized_prob[2005:2010,]
+
+```
+
+The variable p_together here describes the probability the word2 occurs within the context window of word1.
+
+A more instructive and useful type of output can be created by filtering this dataframe for an individual word- let’s try “Trump”:
+
+```{r}
+normalized_prob %>% 
+    filter(word1 == "trump") %>%
+    arrange(-p_together)
+
+normalized_prob %>% 
+    filter(word1 == "his") %>%
+    arrange(-p_together)
+
+normalized_prob %>% 
+    filter(word1 == "her") %>%
+    arrange(-p_together)
+    
+```
+
+These are the words that are most likely to occur within a context window of eight words around Trump, and they generally make sense, which is encouraging. Take a minute to try another politician or political term if you like.
+
+Eventually, we want to be able to plot all of the words in our model in multidimensional space. To do this, we need to make a matrix and reduce the dimensionality of that matrix–later we will use a neural net to do this, but for now we are going to use a simple singular value decomposition from the irlba package. This will take a little bit of time since it is a large matrix. We are asking for 246 dimensions in the code below.
+
+## Matrix / SVD work
+
+```{r}
+pmi_matrix <- normalized_prob %>%
+    mutate(pmi = log10(p_together)) %>%
+    cast_sparse(word1, word2, pmi)
+
+library(irlba)
+```
+
+```{r}
+#remove missing data
+pmi_matrix@x[is.na(pmi_matrix@x)] <- 0
+#run SVD
+pmi_svd <- irlba(pmi_matrix, 256, maxit = 500)
+#next we output the word vectors:
+word_vectors <- pmi_svd$u
+rownames(word_vectors) <- rownames(pmi_matrix)
+```
+
+# Synonyms
+
+Here’s a handy function written by Julia Silge to identify synonyms using the word vectors we created above:
+
+```{r}
+
+search_synonyms <- function(word_vectors, selected_vector) {
+
+    similarities <- word_vectors %*% selected_vector %>%
+      as_tibble(rownames = "token") %>% 
+      rename(similarity = V1)
+
+    similarities %>%
+        arrange(-similarity)    
+}
+
+```
+
+Let’s see what the top synonyms are for the term “president”
+
+```{r}
+
+pres_synonym <- search_synonyms(word_vectors, word_vectors["president",])
+
+```
+
+```{r}
+pres_synonym
+```
+# Graphs
+
+Finally, let’s plot 200 words from our model in 2 dimensional space. In order to do this, we are going to rerun the SVD in two dimensions for easier plotting and interpretation.
+
+```{r}
+pmi_svd <- irlba(pmi_matrix, 2, maxit = 500)
+
+#next we output the word vectors:
+word_vectors <- pmi_svd$u
+rownames(word_vectors) <- rownames(pmi_matrix)
+
+#grab 100 words
+forplot<-as.data.frame(word_vectors[200:300,])
+forplot$word<-rownames(forplot)
+
+#now plot
+library(ggplot2)
+ggplot(forplot, aes(x=V1, y=V2, label=word))+
+  geom_text(aes(label=word),hjust=0, vjust=0, color="blue")+
+  theme_minimal()+
+  xlab("First Dimension Created by SVD")+
+  ylab("Second Dimension Created by SVD")
+```
+# Word Math
+
+```{r}
+
+resulting_word <- word_vectors["trump",] - word_vectors["kavanaugh",]
+search_synonyms(word_vectors, resulting_word)
+
+
+```
+
